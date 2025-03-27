@@ -77,7 +77,9 @@ After successful deployment, Modal will provide a URL where your application is 
 1. Navigate to the provided Modal deployment URL in your browser
 2. Add `/ui` to the URL to access the Gradio interface (e.g., `https://your-username--voice-chat-app-v1-serve.modal.run/ui`)
 3. If you set a Gradio access key, you'll need to provide it
-4. You will need to have a Browser extension installed on Chrome to add two keys for proxy auth protection e.g. Modal-Key & Modal-Secret
+4. You will need to have a Browser extension installed on Chrome to add two Header keys for proxy auth protection e.g. Modal-Key & Modal-Secret
+   I used Mod header.
+
 
 
 ### Using the Voice Chat
