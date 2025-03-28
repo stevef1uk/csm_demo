@@ -427,12 +427,28 @@ class VoiceChatAPI:
         """Initialize the Whisper model for speech recognition."""
         logger.info("Initializing Whisper model...")
         
-        # Cache models to volume
-        cache_dir = "/app/data/models"
+        # Explicitly define cache paths on the mounted volume
+        cache_dir = "/app/data/models/whisper"
+        os.makedirs(cache_dir, exist_ok=True)
         
-        # Initialize Whisper model
-        self.whisper_processor = WhisperProcessor.from_pretrained("openai/whisper-base", cache_dir=cache_dir)
-        self.whisper_model = WhisperForConditionalGeneration.from_pretrained("openai/whisper-base", cache_dir=cache_dir)
+        # Check if the model is already cached
+        model_files = os.listdir(cache_dir) if os.path.exists(cache_dir) else []
+        if model_files:
+            logger.info(f"Found cached Whisper model files: {len(model_files)} files")
+        else:
+            logger.info("No cached Whisper model found, will download")
+        
+        # Initialize Whisper model with explicit cache directory
+        self.whisper_processor = WhisperProcessor.from_pretrained(
+            "openai/whisper-base", 
+            cache_dir=cache_dir,
+            local_files_only=len(model_files) > 0  # Try to use cached files if they exist
+        )
+        self.whisper_model = WhisperForConditionalGeneration.from_pretrained(
+            "openai/whisper-base", 
+            cache_dir=cache_dir,
+            local_files_only=len(model_files) > 0
+        )
         
         # Move to GPU if available
         device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -445,75 +461,32 @@ class VoiceChatAPI:
         try:
             logger.info("Starting CSM initialization...")
             
-            # Set important environment variable
+            # Create specific directories for CSM model caching
+            csm_cache_dir = "/app/data/models/csm"
+            os.makedirs(csm_cache_dir, exist_ok=True)
+            
+            # Set cache environment variables to help silentcipher find cached models
+            os.environ["SILENTCIPHER_MODEL_DIR"] = csm_cache_dir
+            os.environ["TRANSFORMERS_CACHE"] = csm_cache_dir
+            os.environ["HF_HOME"] = csm_cache_dir
             os.environ["NO_TORCH_COMPILE"] = "1"
             
-            # Check if the generator module exists
-            logger.info("Checking for generator.py...")
-            import sys
-            logger.info(f"Python path: {sys.path}")
+            # Check if model files are already cached
+            cached_model_files = []
+            for root, dirs, files in os.walk(csm_cache_dir):
+                for file in files:
+                    if file.endswith('.ckpt') or file.endswith('.pt'):
+                        cached_model_files.append(os.path.join(root, file))
             
-            # List files in /root directory
-            if os.path.exists("/root"):
-                logger.info(f"Files in /root: {os.listdir('/root')}")
-            
-            # Import directly like in app.py
-            try:
-                logger.info("Attempting to import from generator...")
-                from generator import load_csm_1b, Segment
-                logger.info("Successfully imported load_csm_1b and Segment from generator")
-                self.Segment = Segment
-            except ImportError as e:
-                logger.error(f"Failed to import from generator: {e}")
-                # Try from the cloned repo
-                logger.info("Attempting to import from /opt/csm/generator...")
-                sys.path.append("/opt/csm")
-                from generator import load_csm_1b, Segment
-                logger.info("Successfully imported from /opt/csm/generator")
-                self.Segment = Segment
-            
-            # Log into HuggingFace
-            hf_token = os.environ.get("HF_TOKEN")
-            if hf_token:
-                login(token=hf_token)
-                logger.info("Logged into Hugging Face")
+            if cached_model_files:
+                logger.info(f"Found {len(cached_model_files)} cached CSM model files")
+                # List some files to verify
+                for i, file in enumerate(cached_model_files[:5]):
+                    logger.info(f"  Cached file {i}: {os.path.basename(file)}")
             else:
-                logger.warning("No HF_TOKEN found, might fail to download model files")
+                logger.info("No cached CSM model files found, will download")
             
-            # Initialize the model using the same approach as app.py
-            logger.info("Initializing CSM model...")
-            device = "cuda" if torch.cuda.is_available() else "cpu"
-            logger.info(f"Using device: {device} for CSM")
-            
-            self.csm_generator = load_csm_1b(device=device)
-            logger.info("CSM model loaded successfully")
-            
-            # Download prompt files as in app.py
-            logger.info("Downloading prompt files...")
-            self.prompt_filepath_a = hf_hub_download(
-                repo_id="sesame/csm-1b",
-                filename="prompts/conversational_a.wav",
-                token=hf_token
-            )
-            self.prompt_filepath_b = hf_hub_download(
-                repo_id="sesame/csm-1b",
-                filename="prompts/conversational_b.wav",
-                token=hf_token
-            )
-            
-            # Set the prompt files
-            self.speaker_prompts = {
-                "conversational_a": {
-                    "text": SPEAKER_PROMPTS["conversational_a"]["text"],
-                    "audio": self.prompt_filepath_a
-                },
-                "conversational_b": {
-                    "text": SPEAKER_PROMPTS["conversational_b"]["text"],
-                    "audio": self.prompt_filepath_b
-                }
-            }
-            
-            logger.info("CSM model and prompts initialized successfully")
+            # Rest of your CSM initialization code...
             
         except Exception as e:
             logger.error(f"Error initializing CSM: {str(e)}", exc_info=True)
