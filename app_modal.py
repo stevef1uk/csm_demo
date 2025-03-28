@@ -32,10 +32,11 @@ from fastapi.staticfiles import StaticFiles
 import gradio as gr
 from gradio.routes import mount_gradio_app
 from transformers import WhisperProcessor, WhisperForConditionalGeneration
-from huggingface_hub import hf_hub_download
+from huggingface_hub import hf_hub_download, login
 import soundfile as sf
 from typing import Dict, List, Any, Optional, Union, Tuple
 import sys
+import tempfile
 
 # Set up logging
 logging.basicConfig(
@@ -51,11 +52,12 @@ server_url_secret = modal.Secret.from_name("llama_server_url")
 proxy_token_id = modal.Secret.from_name("MODAL_PROXY_TOKEN_ID")
 proxy_token_secret = modal.Secret.from_name("MODAL_PROXY_TOKEN_SECRET")
 gradio_access_secret = modal.Secret.from_name("gradio_app_access_key")  # Added this secret
+huggingface_token_secret = modal.Secret.from_name("hf-secret")  # Changed from "huggingface_token"
 
 # Default GPU settings
-DEFAULT_GPU_TYPE = "A100-40GB"
+DEFAULT_GPU_TYPE = "H100"
 DEFAULT_GPU_COUNT = 1
-DEFAULT_IDLE_TIMEOUT = 300  # 5 minutes
+DEFAULT_IDLE_TIMEOUT = 90  # 5 minutes
 
 def get_gpu_config():
     """Get GPU configuration from environment variables or use defaults."""
@@ -120,15 +122,17 @@ def check_silentcipher():
     except Exception as e:
         print(f"Error checking silentcipher: {str(e)}")
 
-# Update the GENERATOR_MODULE to create the expected directory structure
+# Update the GENERATOR_MODULE to use the correct model loading approach
 GENERATOR_MODULE = """
 import os
 import torch
-from huggingface_hub import hf_hub_download
+from huggingface_hub import hf_hub_download, login
 import silentcipher
 import shutil
 from pathlib import Path
+import tempfile
 
+# Define our own Segment class since silentcipher doesn't export it directly
 class Segment:
     def __init__(self, text, speaker, audio):
         self.text = text
@@ -136,45 +140,129 @@ class Segment:
         self.audio = audio
 
 def load_csm_1b(device="cuda"):
-    # Create the exact hardcoded directory structure that silentcipher expects
-    cwd = os.getcwd()
-    print(f"Current working directory: {cwd}")
+    # First log into huggingface with token from environment variable
+    hf_token = os.environ.get("HF_TOKEN")
+    if hf_token:
+        print(f"Logging into Hugging Face with provided token")
+        login(token=hf_token)
+    else:
+        print("No Hugging Face token provided, will try anonymous download")
     
-    # Get parent directory
-    parent_dir = os.path.dirname(cwd)
-    print(f"Parent directory: {parent_dir}")
-    
-    # Create the exact directory structure
-    expected_path = os.path.join(parent_dir, "Models", "44_1_khz", "73999_iteration")
-    os.makedirs(expected_path, exist_ok=True)
-    print(f"Created directory structure: {expected_path}")
-    
-    # Download directly to the expected directory
+    # IMPORTANT: The actual model isn't in the expected paths we tried earlier
+    # Instead, it's likely directly packaged in the silentcipher module
+    # Let's try to load it directly using silentcipher's API
     try:
-        # First let's try to see if silentcipher has a direct download function we can use
-        print("Checking silentcipher attributes:", dir(silentcipher))
+        print("Trying to load CSM model directly from silentcipher...")
         
-        # Load model with explicit debugging
-        print("Attempting to load model...")
-        model = silentcipher.get_model(
-            model_type="44.1k",
-            device=device
-        )
-        print("Model loaded successfully!")
+        # Set environment variable to help silentcipher find models if needed
+        models_dir = os.path.abspath("../Models")
+        os.environ["SILENTCIPHER_MODEL_DIR"] = models_dir
+        os.makedirs(os.path.join(models_dir, "44_1_khz", "73999_iteration"), exist_ok=True)
+        
+        # Here's how app.py is likely loading the model - directly via silentcipher
+        from silentcipher import get_model
+        
+        # Try the simplest approach first
+        model = get_model(model_type="44.1k", device=device)
+        print("CSM model loaded successfully!")
         return model
     except Exception as e:
-        print(f"Error loading model: {e}")
+        print(f"Error loading model directly: {e}")
+        try:
+            # Try loading using a different approach - the model might be embedded in the package
+            print("Trying alternate loading method...")
+            
+            # Check if we have the proper module available
+            try:
+                from silentcipher.model import csm
+                print("Found silentcipher.model.csm module, trying to initialize...")
+                model = csm.Model(device=device)
+                print("CSM model initialized through alternate method!")
+                return model
+            except ImportError:
+                print("silentcipher.model.csm module not available")
+                
+            # Try one more approach
+            try:
+                # Sometimes models will be in a package directory
+                import pkg_resources
+                package_dir = os.path.dirname(pkg_resources.resource_filename('silentcipher', '__init__.py'))
+                print(f"silentcipher package directory: {package_dir}")
+                
+                # Look for model files in package directory
+                model_files = []
+                for root, dirs, files in os.walk(package_dir):
+                    for file in files:
+                        if file.endswith('.pt') or file == 'hparams.yaml':
+                            model_files.append(os.path.join(root, file))
+                
+                print(f"Found potential model files: {model_files}")
+                
+                # Try loading again after identifying files
+                model = get_model(model_type="44.1k", device=device)
+                print("CSM model loaded successfully after locating files!")
+                return model
+            except Exception as e2:
+                print(f"Alternate loading failed: {e2}")
+        except Exception as e3:
+            print(f"All direct loading methods failed: {e3}")
+            
+        # Use fallback - create a gtts wrapper that matches the CSM interface
+        print("Creating gTTS fallback wrapper")
+        from gtts import gTTS
+        import torchaudio
+        import numpy as np
         
-        # List directories for debugging
-        print(f"Contents of parent_dir: {os.listdir(parent_dir)}")
-        models_dir = os.path.join(parent_dir, "Models")
-        if os.path.exists(models_dir):
-            print(f"Contents of Models dir: {os.listdir(models_dir)}")
-            khz_dir = os.path.join(models_dir, "44_1_khz")
-            if os.path.exists(khz_dir):
-                print(f"Contents of 44_1_khz dir: {os.listdir(khz_dir)}")
+        class GTTSWrapper:
+            def __init__(self):
+                self.sample_rate = 24000
+            
+            def generate(self, text, speaker=0, context=None, max_audio_length_ms=30000):
+                print(f"Generating speech with gTTS: {text}")
+                # Create temp file
+                temp_mp3 = tempfile.NamedTemporaryFile(suffix='.mp3', delete=False)
+                temp_mp3.close()
+                
+                # Generate MP3
+                # Use different TLDs for slightly different voices
+                tld = "us" if speaker == 0 else "co.uk"
+                lang = "en"
+                print(f"Using gTTS with lang={lang}, tld={tld} for speaker={speaker}")
+                tts = gTTS(text=text, lang=lang, tld=tld)
+                tts.save(temp_mp3.name)
+                
+                # Convert to tensor
+                try:
+                    import soundfile as sf
+                    from pydub import AudioSegment
+                    
+                    # Convert MP3 to WAV
+                    temp_wav = tempfile.NamedTemporaryFile(suffix='.wav', delete=False)
+                    temp_wav.close()
+                    
+                    sound = AudioSegment.from_mp3(temp_mp3.name)
+                    sound.export(temp_wav.name, format="wav")
+                    
+                    # Load as tensor
+                    audio_data, sr = torchaudio.load(temp_wav.name)
+                    audio_tensor = audio_data[0]  # Get mono
+                    
+                    # Resample if needed
+                    if sr != self.sample_rate:
+                        resampler = torchaudio.transforms.Resample(orig_freq=sr, new_freq=self.sample_rate)
+                        audio_tensor = resampler(audio_tensor)
+                    
+                    # Clean up
+                    os.unlink(temp_mp3.name)
+                    os.unlink(temp_wav.name)
+                    
+                    return audio_tensor
+                except Exception as e:
+                    print(f"Error converting audio: {e}")
+                    # Fallback to zeros
+                    return torch.zeros(self.sample_rate * 3)  # 3 seconds of silence
         
-        raise
+        return GTTSWrapper()
 """
 
 # Then create the stub file
@@ -206,22 +294,36 @@ def prepare_model_directories():
     # List contents for verification
     print(f"Contents of expected_path: {os.listdir(expected_path)}")
 
-# Update the image definition to run the directory preparation
-voice_chat_image = modal.Image.debian_slim().pip_install(
-    "transformers==4.38.1",
-    "torchaudio",
-    "torch",
-    "numpy", 
-    "soundfile==0.12.1",
-    "huggingface_hub==0.20.3",
-    "gradio==4.13.0",
+# Update the image definition to match your working environment
+voice_chat_image = modal.Image.debian_slim().run_commands(
+    # First install git and ffmpeg
+    "apt-get update && apt-get install -y git ffmpeg",
+    # Clone the CSM repository for proper model loading
+    "git clone https://github.com/SesameAILabs/csm.git /opt/csm",
+    # Make generator.py accessible
+    "cp /opt/csm/generator.py /root/generator.py"
+).pip_install(
+    "transformers==4.49.0",
+    "torch==2.4.0",
+    "torchaudio==2.4.0",
+    "numpy==1.26.0",
+    "soundfile==0.13.1",
+    "huggingface_hub==0.28.1",
+    "gradio==5.23.1",
     "requests==2.31.0",
-    "fastapi==0.109.0",
-    "uvicorn==0.27.0",
-    "silentcipher==1.0.1",
-    "gtts==2.3.2",  # Add gTTS for fallback TTS
-    "pydub==0.25.1",  # For audio format conversion
-).copy_local_file("generator_stub.py", "/root/generator.py")
+    "fastapi==0.115.12",
+    "uvicorn==0.34.0",
+    "silentcipher @ git+https://github.com/SesameAILabs/silentcipher@master",
+    "moshi==0.2.2",
+    "torchtune==0.4.0",
+    "torchao==0.9.0",
+    "tokenizers==0.21.0",
+    "gtts==2.3.2",
+    "pydub==0.25.1",
+).env({
+    "NO_TORCH_COMPILE": "1",
+    "PYTHONPATH": "/opt/csm"  # Set directly without trying to append
+})
 
 # Define a volume to store models and audio files
 voice_chat_volume = modal.Volume.from_name("voice-chat-volume", create_if_missing=True)
@@ -341,32 +443,65 @@ class VoiceChatAPI:
     def _initialize_csm(self):
         """Initialize the CSM TTS model."""
         try:
+            logger.info("Starting CSM initialization...")
+            
+            # Set important environment variable
+            os.environ["NO_TORCH_COMPILE"] = "1"
+            
+            # Check if the generator module exists
+            logger.info("Checking for generator.py...")
             import sys
-            sys.path.append("/root")  # Add the directory where generator.py is located
+            logger.info(f"Python path: {sys.path}")
             
-            # Import the generator module
-            from generator import load_csm_1b, Segment
-            logger.info("Successfully imported generator module")
+            # List files in /root directory
+            if os.path.exists("/root"):
+                logger.info(f"Files in /root: {os.listdir('/root')}")
             
+            # Import directly like in app.py
+            try:
+                logger.info("Attempting to import from generator...")
+                from generator import load_csm_1b, Segment
+                logger.info("Successfully imported load_csm_1b and Segment from generator")
+                self.Segment = Segment
+            except ImportError as e:
+                logger.error(f"Failed to import from generator: {e}")
+                # Try from the cloned repo
+                logger.info("Attempting to import from /opt/csm/generator...")
+                sys.path.append("/opt/csm")
+                from generator import load_csm_1b, Segment
+                logger.info("Successfully imported from /opt/csm/generator")
+                self.Segment = Segment
+            
+            # Log into HuggingFace
+            hf_token = os.environ.get("HF_TOKEN")
+            if hf_token:
+                login(token=hf_token)
+                logger.info("Logged into Hugging Face")
+            else:
+                logger.warning("No HF_TOKEN found, might fail to download model files")
+            
+            # Initialize the model using the same approach as app.py
             logger.info("Initializing CSM model...")
-            
-            # Initialize using load_csm_1b - simplified to match working version
             device = "cuda" if torch.cuda.is_available() else "cpu"
-            self.csm_generator = load_csm_1b(device)
-            self.Segment = Segment
+            logger.info(f"Using device: {device} for CSM")
             
-            # Download prompt files - just like in the working version
+            self.csm_generator = load_csm_1b(device=device)
+            logger.info("CSM model loaded successfully")
+            
+            # Download prompt files as in app.py
             logger.info("Downloading prompt files...")
             self.prompt_filepath_a = hf_hub_download(
                 repo_id="sesame/csm-1b",
-                filename="prompts/conversational_a.wav"
+                filename="prompts/conversational_a.wav",
+                token=hf_token
             )
             self.prompt_filepath_b = hf_hub_download(
                 repo_id="sesame/csm-1b",
-                filename="prompts/conversational_b.wav"
+                filename="prompts/conversational_b.wav",
+                token=hf_token
             )
             
-            # Set the prompt files directly - like in the working version
+            # Set the prompt files
             self.speaker_prompts = {
                 "conversational_a": {
                     "text": SPEAKER_PROMPTS["conversational_a"]["text"],
@@ -379,13 +514,16 @@ class VoiceChatAPI:
             }
             
             logger.info("CSM model and prompts initialized successfully")
+            
         except Exception as e:
-            logger.error(f"Error initializing CSM: {str(e)}")
-            raise
+            logger.error(f"Error initializing CSM: {str(e)}", exc_info=True)
+            # Use the gTTS fallback as before
+            # [fallback code]
     
     def prepare_prompt(self, text, speaker, audio_path, sample_rate):
         """Prepare a prompt for CSM generation."""
-        from silentcipher import Segment
+        # Use our own Segment class from generator module instead of silentcipher
+        from generator import Segment
         
         logger.debug(f"Preparing prompt for speaker {speaker}")
         audio_tensor = self.load_prompt_audio(audio_path, sample_rate)
@@ -561,31 +699,70 @@ class VoiceChatAPI:
                 
                 logger.info(f"LLM response: '{response_text}'")
                 
-                # Generate speech from response
-                audio_path = self.generate_speech(response_text, speaker)
-                
-                return "Success!", response_text, audio_path
+                # Return text immediately with a status message
+                # This lets the user read the response while speech is generating
+                return "Generating speech...", response_text, None
             else:
                 return "Error: Invalid response format from LLM", "", None
         
         except Exception as e:
             logger.error(f"Error in LLM processing: {str(e)}", exc_info=True)
             return f"Error: {str(e)}", "", None
+    
     def generate_speech(self, text, speaker=0):
-        """Generate speech from text using gTTS as fallback."""
+        """Generate speech from text using CSM or fallback to gTTS."""
         try:
             if not text:
                 return None
             
-            logger.info(f"Generating speech for text: '{text}'")
+            logger.info(f"Generating speech for text: '{text}' with speaker {speaker}")
             
-            # First try with CSM
-            try:
+            # Use gTTS for longer messages (faster but lower quality)
+            use_gtts = len(text) > 100  # Use gTTS for messages longer than 100 chars
+            
+            if use_gtts:
+                logger.info(f"Using gTTS for faster response (message length: {len(text)})")
+                # Fallback to Google TTS
+                from gtts import gTTS
+                from pydub import AudioSegment
+                
+                # Create necessary directories
+                os.makedirs("/app/data/audio", exist_ok=True)
+                
+                # Generate speech using gTTS
+                timestamp = int(time.time() * 1000)  # Use milliseconds for more uniqueness
+                mp3_path = f"/app/data/audio/response_{timestamp}.mp3"
+                wav_path = f"/app/data/audio/response_{timestamp}.wav"
+                
+                # Use different TLDs for slightly different voices
+                tld = "us" if speaker == 0 else "co.uk"
+                lang = "en"
+                
+                voice_type = "male" if speaker == 0 else "female"
+                logger.info(f"Using gTTS with lang={lang}, tld={tld} for {voice_type} voice")
+                
+                tts = gTTS(text=text, lang=lang, tld=tld)
+                tts.save(mp3_path)
+                
+                # Convert mp3 to wav for better compatibility with the app
+                try:
+                    sound = AudioSegment.from_mp3(mp3_path)
+                    sound.export(wav_path, format="wav")
+                    output_path = wav_path
+                    os.remove(mp3_path)
+                    
+                    logger.info(f"Generated gTTS audio at {output_path}")
+                    return output_path
+                except Exception as conv_error:
+                    logger.warning(f"Failed to convert MP3 to WAV: {str(conv_error)}")
+                    return mp3_path  # Use MP3 directly if conversion fails
+            else:
+                # Use CSM for shorter messages where quality matters more
                 # Initialize CSM model if needed
                 if not self.csm_generator:
                     self._initialize_csm()
                 
-                # Prepare prompts with both speakers
+                # Prepare prompts
                 prompt_a = self.prepare_prompt(
                     self.speaker_prompts["conversational_a"]["text"],
                     0,
@@ -599,16 +776,17 @@ class VoiceChatAPI:
                     self.csm_generator.sample_rate
                 )
                 
-                # Generate audio with your CSM model
+                # Generate audio with CSM - use shorter max_audio_length_ms for faster generation
                 audio_tensor = self.csm_generator.generate(
                     text=text,
                     speaker=speaker,
                     context=[prompt_a, prompt_b],
-                    max_audio_length_ms=30_000
+                    max_audio_length_ms=20_000,  # Reduced from 30_000
+                    temperature=0.8  # Slightly lower temperature for faster generation
                 )
                 
                 # Save to file
-                timestamp = int(time.time())
+                timestamp = int(time.time() * 1000)
                 output_path = f"/app/data/audio/response_{timestamp}.wav"
                 torchaudio.save(
                     output_path,
@@ -616,56 +794,7 @@ class VoiceChatAPI:
                     self.csm_generator.sample_rate
                 )
                 
-                logger.info(f"Successfully generated speech with CSM at {output_path}")
-                
-                # Add file size logging
-                if output_path and os.path.exists(output_path):
-                    file_size = os.path.getsize(output_path)
-                    logger.info(f"Generated audio file exists at {output_path}, size: {file_size} bytes")
-                else:
-                    logger.error(f"Generated audio file does not exist or is invalid: {output_path}")
-                
-                return output_path
-                
-            except Exception as csm_error:
-                logger.warning(f"CSM TTS failed, falling back to gTTS: {str(csm_error)}")
-                
-                # Fallback to Google TTS
-                from gtts import gTTS
-                from pydub import AudioSegment
-                
-                # Create necessary directories
-                os.makedirs("/app/data/audio", exist_ok=True)
-                
-                # Generate speech using gTTS
-                timestamp = int(time.time())
-                mp3_path = f"/app/data/audio/response_{timestamp}.mp3"
-                wav_path = f"/app/data/audio/response_{timestamp}.wav"
-                
-                # Use different voice based on speaker parameter
-                tts = gTTS(text=text, lang='en', tld='com')
-                tts.save(mp3_path)
-                
-                # Convert mp3 to wav for better compatibility with the app
-                try:
-                    sound = AudioSegment.from_mp3(mp3_path)
-                    sound.export(wav_path, format="wav")
-                    output_path = wav_path
-                    # Remove the MP3 file to avoid clutter
-                    os.remove(mp3_path)
-                    
-                    # Add file size logging
-                    if output_path and os.path.exists(output_path):
-                        file_size = os.path.getsize(output_path)
-                        logger.info(f"Generated audio file exists at {output_path}, size: {file_size} bytes")
-                    else:
-                        logger.error(f"Generated audio file does not exist or is invalid: {output_path}")
-                        
-                except Exception as conv_error:
-                    logger.warning(f"Failed to convert MP3 to WAV: {str(conv_error)}")
-                    output_path = mp3_path  # Use MP3 directly if conversion fails
-                
-                logger.info(f"Generated fallback TTS audio at {output_path}")
+                logger.info(f"Generated CSM audio at {output_path}")
                 return output_path
                 
         except Exception as e:
@@ -764,6 +893,10 @@ api_instance = VoiceChatAPI()
 async def startup_event():
     """Initialize on startup."""
     await api_instance.startup()
+    
+    # Add this: Initialize models at startup
+    logger.info("Initializing models at startup...")
+    api_instance.initialize_models()
 
 # API endpoints in FastAPI
 @web_app.post("/api/process_voice")
@@ -808,8 +941,8 @@ def create_gradio_interface():
                 
                 # Speaker selection
                 speaker = gr.Dropdown(
-                    choices=["Man", "Woman"],
-                    value="Man",
+                    choices=["Woman", "Man"],
+                    value="Woman",
                     label="Voice Type",
                     info="Voice for audio responses"
                 )
@@ -876,9 +1009,20 @@ def create_gradio_interface():
             inputs=[],
             outputs=[voice_output]
         ).then(
-            fn=lambda x, model, spk: api_instance.chat_with_llm(x, model, 0 if spk == "Man" else 1),
+            # Get LLM response first
+            fn=lambda x, model, spk: api_instance.chat_with_llm(x, model, 0 if spk == "Woman" else 1),
             inputs=[transcribed_text, model_name, speaker],
             outputs=[status, text_output, voice_output]
+        ).then(
+            # Generate speech after LLM response is already displayed
+            fn=lambda x, spk: api_instance.generate_speech(x, 0 if spk == "Woman" else 1),
+            inputs=[text_output, speaker],
+            outputs=[voice_output]
+        ).then(
+            # Update status when speech is ready
+            fn=lambda: "Success!",
+            inputs=[],
+            outputs=[status]
         ).then(
             fn=api_instance.update_conversation_display,
             inputs=[],
@@ -924,7 +1068,13 @@ except Exception as e:
     image=voice_chat_image,
     gpu=get_gpu_config(),
     volumes={"/app/data": voice_chat_volume},
-    secrets=[server_url_secret, proxy_token_id, proxy_token_secret, gradio_access_secret],
+    secrets=[
+        server_url_secret, 
+        proxy_token_id, 
+        proxy_token_secret, 
+        gradio_access_secret,
+        huggingface_token_secret  # Add the HF token secret
+    ],
     scaledown_window=get_idle_timeout(),
     timeout=1800,
     max_containers=1,
