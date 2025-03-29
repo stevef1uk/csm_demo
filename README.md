@@ -1,25 +1,70 @@
-# Multimodal Voice Chat with Ollama LLM
+# Multimodal Voice Chat with AI Models
 
-This application provides a web-based voice chat interface powered by Ollama language models, deployed on Modal. It features speech-to-text, LLM processing, and text-to-speech capabilities in a single container.
+This application provides a voice chat interface powered by AI language models (Scaleway and Ollama). It features speech-to-text, LLM processing, and text-to-speech capabilities with support for multiple voice types.
 
 ## Features
 
 - **Speech-to-Text**: Uses Whisper model to transcribe user voice input
-- **LLM Integration**: Connects to remote Ollama server for text processing
-- **Text-to-Speech**: Generates natural-sounding speech with CSM (Conditioned Sound Model)
+- **Dual LLM Integration**: 
+  - **Scaleway AI**: Connect to Scaleway's hosted LLM service
+  - **Ollama**: Connect to a self-hosted Ollama server
+- **Text-to-Speech**: Generates natural-sounding speech with:
+  - **CSM (Conditioned Sound Model)**: High-quality voice for responses up to 300 characters
+  - **gTTS (Google Text-to-Speech)**: Efficient fallback for longer responses
+- **Voice Selection**: Choose between Woman and Man voices with consistent mapping
 - **Conversation Memory**: Maintains context throughout the conversation
-- **GPU Acceleration**: Optimized for ML tasks using Modal's GPU capabilities
-- **Secure Deployment**: Includes authentication for the Modal proxy
+- **GPU Acceleration**: Optimized for ML tasks using CUDA if available
+- **Responsive UI**: Clear interface with service selection and voice type options
 
 ## Prerequisites
 
+### For Local Deployment (`app_scaleway.py`)
+
+- Python 3.8+
+- CUDA-compatible GPU (recommended for CSM performance)
+- Scaleway API key (for Scaleway service)
+- Ollama server (optional, for Ollama service)
+
+### For Modal Deployment (`app_modal.py`)
+
 - A [Modal](https://modal.com/) account
 - An Ollama server endpoint for LLM access
-- Python 3.8+
 - Modal CLI installed (`pip install modal`)
 - Hugging Face account (for CSM model access)
 
-## Setup Instructions
+## Setup Instructions for Local Deployment
+
+### Step 1: Create a Python virtual environment
+
+```bash
+python -m venv venv
+source venv/bin/activate  # On Windows: venv\Scripts\activate
+```
+
+### Step 2: Install dependencies
+
+```bash
+pip install torch torchaudio transformers gradio requests sounddevice numpy soundfile openai huggingface_hub
+pip install silentcipher@git+https://github.com/SesameAILabs/silentcipher@master
+pip install gtts pydub  # For gTTS fallback
+```
+
+### Step 3: Set environment variables
+
+```bash
+# Set your Scaleway API key
+export SCALEWAY_API_KEY="your-scaleway-api-key"
+```
+
+### Step 4: Run the application
+
+```bash
+python app_scaleway.py
+```
+
+The application will be available at http://localhost:7860 by default.
+
+## Setup Instructions for Modal Deployment
 
 ### Step 1: Install the Modal CLI
 
@@ -54,125 +99,109 @@ modal secret create gradio_app_access_key "your-access-key"
 modal secret create hf-secret "your-huggingface-token"
 ```
 
-### Step 4: Create a Modal Volume
+### Step 4: Create a Modal Volume and Deploy
 
 ```bash
 modal volume create voice-chat-volume
-```
-
-## Deployment
-
-### Step 1: Save the application code
-
-Save the provided code as `app_modal.py`.
-
-### Step 2: Deploy to Modal
-
-```bash
 modal deploy app_modal.py
 ```
-
-After successful deployment, Modal will provide a URL where your application is hosted.
 
 ## Using the Application
 
 ### Accessing the Web Interface
 
-1. Navigate to the provided Modal deployment URL in your browser
-2. Add `/ui` to the URL to access the Gradio interface (e.g., `https://your-username--voice-chat-app-v1-serve.modal.run/ui`)
-3. If you set a Gradio access key, you'll need to provide it
-4. You will need to have a Browser extension installed on Chrome to add two Header keys for proxy auth protection e.g. Modal-Key & Modal-Secret values from the token created in Step 3
-   I used Mod Header extension.
+1. Navigate to the local URL or Modal deployment URL in your browser
+2. For Modal, add `/ui` to the URL (e.g., `https://your-username--voice-chat-app-v1-serve.modal.run/ui`)
 
 ### Using the Voice Chat
 
-1. **Select a Model**: Choose from available Ollama models in the dropdown
-2. **Choose Voice Type**: Select "Woman" or "Man" for the AI's voice response
-3. **Record Audio**: Click the microphone icon and speak your message
-4. **Process Message**: Your speech will be automatically transcribed and processed
-5. **Listen to Response**: The AI's response will be displayed as text and played as audio
-6. **Reset Conversation**: Use the reset button to start a new conversation
+1. **Select AI Service**: Choose between Scaleway (default) or Ollama
+2. **Select a Model**: Choose from available models in the dropdown
+   - Scaleway models: deepseek-r1-distill-llama-70b, meta-llama-3-70b-instruct, mixtral-8x7b-instruct-v0.1
+   - Ollama models: mistral:latest, llama3:8b, llama3:70b, gemma3:27b, phi3:14b, mixtral:8x7b, codellama:70b
+3. **Choose Voice Type**: Select "Woman" or "Man" for the AI's voice response
+4. **Record Audio**: Click the microphone icon and speak your message
+5. **Process Message**: Your speech will be automatically transcribed and processed
+6. **Listen to Response**: The AI's response will be displayed as text and played as audio
+7. **Reset Conversation**: Use the reset button to start a new conversation
 
-### API Endpoints
-
-The application also provides REST API endpoints:
-
-- `POST /api/process_voice`: Process voice input and get response
-- `POST /api/reset_conversation`: Reset the conversation history
-- `GET /health`: Check if the API is running
-
-## Speech Generation
+## Speech Generation Features
 
 The application uses two speech generation methods:
 
-1. **CSM (Conditioned Sound Model)**: For high-quality voice synthesis of shorter responses 
-2. **gTTS (Google Text-to-Speech)**: As a fallback and for longer responses to reduce latency
+1. **CSM (Conditioned Sound Model)**:
+   - High-quality voice synthesis for responses up to 300 characters
+   - Consistent voice mapping (Man and Woman voices)
+   - Optimized parameters for faster generation
 
-Speech generation is now optimized to:
-- Display text responses immediately while audio is being generated
-- Use gTTS for responses over 100 characters (for faster response time)
-- Use CSM with optimized parameters for shorter responses where quality matters more
+2. **gTTS (Google Text-to-Speech)**:
+   - Used for responses longer than 300 characters
+   - Different voice mapping using regional accents:
+     - Woman voice: US English (tld="us")
+     - Man voice: UK English (tld="co.uk")
 
-## Customization Options
+Text is sanitized before speech generation, with special handling for:
+- Removal of asterisks and other problematic characters
+- Preservation of standard punctuation for natural speech
+- Normalization of quotes and whitespace
 
-### GPU Configuration
+## Advanced Configuration Options
 
-You can customize the GPU by setting environment variables:
+### Local Deployment Options
+
+You can customize the application by modifying:
 
 ```bash
-# Set GPU type and count (default is H100)
-modal app update voice-chat-app-v1 --env GPU_TYPE=A100-80GB --env GPU_COUNT=1
+# Set the port for the Gradio interface
+export GRADIO_PORT=8080
 
-# Set idle timeout (in seconds, default is 90 seconds)
-modal app update voice-chat-app-v1 --env IDLE_TIMEOUT=600
+# Enable debug logging
+export PYTHONPATH=./  # If needed to resolve import issues
 ```
 
-### Supported LLM Models
+### Making the App Public
 
-The application supports various Ollama models, including:
-- llama3:8b
-- llama3:70b
-- gemma3:27b
-- phi3:14b
-- mistral:7b
-- mixtral:8x7b
-- codellama:70b
+To make your Gradio app publicly accessible:
 
-## Hugging Face Integration
-
-The application uses Hugging Face models for:
-
-1. **Speech recognition**: OpenAI Whisper model for transcription
-2. **Speech synthesis**: Sesame CSM-1B model for high-quality voice generation
-
-The Hugging Face authentication token is required to download these models, particularly the CSM model which requires authentication. The token is passed to the container via the `hf-secret` Modal secret.
+1. With the local deployment, set `share=True` in the `demo.launch()` call (already configured)
+2. For Modal deployment, the app is accessible via the provided URL
 
 ## Troubleshooting
 
 ### Common Issues
 
-1. **Audio Not Working**: Ensure your browser has microphone permissions enabled
-2. **LLM Connection Errors**: Verify your Ollama server URL is correct and accessible
-3. **Modal Deployment Failures**: Check logs using `modal app logs voice-chat-app-v1`
-4. **Authentication Issues**: Ensure your Modal proxy tokens and Hugging Face token are correctly set up
-5. **Slow Speech Generation**: For very long responses, the CSM model may take time to generate audio. The application now displays text immediately while audio is being prepared
+1. **Voice Mapping Confusion**: If voices sound incorrect, verify the CSM constants at the top of the file:
+   ```python
+   SPEAKER_ID_WOMAN = 0  # UI selection "Woman" 
+   SPEAKER_ID_MAN = 1    # UI selection "Man"
+   CSM_SPEAKER_WOMAN = 0  # CSM model expects ID 0 for woman
+   CSM_SPEAKER_MAN = 1    # CSM model expects ID 1 for man
+   ```
 
-### Viewing Logs
+2. **Audio Not Working**: Ensure your browser has microphone permissions enabled
 
-```bash
-modal app logs voice-chat-app-v1
-```
+3. **LLM Connection Errors**:
+   - For Scaleway: Verify your API key is correctly set
+   - For Ollama: Verify your server URL is correct and accessible
+
+4. **Missing gTTS**: If you see warnings about missing gTTS, install the packages:
+   ```bash
+   pip install gtts pydub
+   ```
+
+5. **Slow Speech Generation**: For responses close to the 300-character threshold, the CSM model may take time to generate audio. The application displays text immediately while audio is being prepared.
 
 ## Architecture
 
 The application consists of the following components:
 
-- **Modal App**: Deploys the FastAPI and Gradio interfaces
 - **Whisper Model**: Converts speech to text
-- **Ollama Integration**: Communicates with the LLM server
+- **LLM Integration**:
+  - Scaleway API for cloud-based LLMs
+  - Ollama for self-hosted LLMs
 - **CSM Model**: High-quality text-to-speech using Sesame's Conversational Speech Model
 - **gTTS Fallback**: Faster alternative for long responses
-- **Modal Volume**: Provides persistent storage for models and audio files
+- **Gradio UI**: Provides intuitive web interface
 
 ## License
 
@@ -180,6 +209,4 @@ This project is provided as-is for educational and demonstration purposes.
 
 ## Credits
 
-Developed by Steven Fisher (stevef@gmail.com) based on CSM.
-
-CSM (Conversational Speech Model) is a speech generation model from [Sesame](https://www.sesame.com) that generates RVQ audio codes from text and audio inputs. The model architecture employs a [Llama](https://www.llama.com/) backbone and a smaller audio decoder that produces [Mimi](https://huggingface.co/kyutai/mimi) audio codes.
+Developed based on CSM (Conversational Speech Model) from [Sesame](https://www.sesame.com), which generates high-quality speech from text. The model architecture employs a [Llama](https://www.llama.com/) backbone and a smaller audio decoder that produces [Mimi](https://huggingface.co/kyutai/mimi) audio codes.
