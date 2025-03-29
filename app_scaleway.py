@@ -96,6 +96,9 @@ SPEAKER_ID_MAN = 1    # UI selection "Man"
 CSM_SPEAKER_WOMAN = 0  # CSM model expects ID 0 for woman
 CSM_SPEAKER_MAN = 1    # CSM model expects ID 1 for man
 
+# First, let's add a global variable to track the current service
+CURRENT_SERVICE = "Scaleway"  # Default to Scaleway
+
 def log_timing(operation_name, start_time):
     """Log the time taken for an operation"""
     end_time = time.time()
@@ -124,6 +127,9 @@ def chat_with_ollama(message, model_name, ollama_url):
     """Send message to Ollama and get response"""
     global conversation_history
     logger.info(f"Sending message to Ollama model: {model_name}")
+    print(f"🔷 EXPLICITLY USING OLLAMA API with model: {model_name}")
+    print(f"🔗 Connecting to Ollama URL: {ollama_url}")
+    
     url = f"{ollama_url}/api/chat"
     
     # Start API request timer
@@ -135,6 +141,10 @@ def chat_with_ollama(message, model_name, ollama_url):
         error_msg = "Model name cannot be empty"
         logger.error(error_msg)
         return error_msg
+    
+    # Log the URL we're trying to connect to
+    logger.info(f"Full Ollama API URL: {url}")
+    print(f"🔄 Making direct request to Ollama API at: {url}")
     
     # Create a system prompt for conversational, concise responses
     system_prompt = "You are a friendly AI assistant. Keep your responses casual and conversational, using a maximum of two short sentences. Be concise and direct."
@@ -525,7 +535,7 @@ def chat_with_scaleway(message, model_name, api_key):
     """Send message to Scaleway LLM API and get response"""
     global conversation_history
     logger.info(f"EXPLICITLY USING SCALEWAY API with model: {model_name}")
-    print(f"🌐 EXPLICITLY USING SCALEWAY API with model: {model_name}")
+    print(f"☁️ EXPLICITLY USING SCALEWAY API with model: {model_name}")
     
     if not api_key:
         error_msg = "Scaleway API key is required"
@@ -595,7 +605,7 @@ def chat_with_scaleway(message, model_name, api_key):
             print(f"📝 Scaleway response received: {len(response_text)} characters in {api_time:.2f} seconds")
             
             # Add verification that we used Scaleway
-            print(f"🌐 Response confirmed from Scaleway API for model {model_name}")
+            print(f"☁️ Response confirmed from Scaleway API for model {model_name}")
             
             return response_text
         
@@ -1186,13 +1196,14 @@ with gr.Blocks() as demo:
         # Replace special quotes with standard quotes
         text = text.replace('"', '"').replace('"', '"').replace(''', "'").replace(''', "'")
         
-        # SPECIFICALLY REMOVE ASTERISKS before sanitizing other characters
+        # SPECIFICALLY REMOVE ASTERISKS AND EXCLAMATION POINTS 
         text = text.replace('*', '')
+        text = text.replace('!', ' ')  # Replace exclamation marks with spaces
         
         # LESS AGGRESSIVE FILTERING: Allow common punctuation and symbols
         # Only remove truly problematic characters
-        # Note: Removed asterisk (*) from the allowed characters
-        text = re.sub(r'[^\w\s.,!?()\'":;\-–—+&%$#@/\\|{}\[\]<>]', '', text)
+        # Note: Removed asterisk (*) and exclamation (!) from the allowed characters
+        text = re.sub(r'[^\w\s.,?()\'":;\-–—+&%$#@/\\|{}\[\]<>]', '', text)
         
         # Normalize whitespace (replace multiple spaces with a single space)
         text = re.sub(r'\s+', ' ', text)
@@ -1201,14 +1212,16 @@ with gr.Blocks() as demo:
         text = text.strip()
         
         # Only add ending punctuation if there's none already
-        if text and not re.search(r'[.!?]$', text):
+        if text and not re.search(r'[.?]$', text):  # Removed ! from this check
             text += '.'
         
         return text
 
     # Step 1: Get LLM response only
-    def get_llm_response(transcription, model_name, ollama_url, service="Scaleway"):
+    def get_llm_response(transcription, model_name, ollama_url, service=None):
         """Get LLM response only, without waiting for audio generation"""
+        global CURRENT_SERVICE
+        
         if not transcription or transcription == "":
             return "No text to process", ""
         
@@ -1216,18 +1229,35 @@ with gr.Blocks() as demo:
             # Start timing for LLM response
             llm_start_time = time.time()
             
-            # Get service from UI if available, otherwise use parameter
-            service = llm_service.value if hasattr(llm_service, 'value') else service
+            # Determine which service to use with fallback options
+            # 1. Use explicitly provided service parameter if given
+            # 2. Use global CURRENT_SERVICE if available
+            # 3. Try to get from UI component
+            # 4. Default to Scaleway as last resort
+            current_service = service
+            if current_service is None:
+                current_service = CURRENT_SERVICE
+            if current_service is None and hasattr(llm_service, 'value'):
+                current_service = llm_service.value
+            if current_service is None:
+                current_service = "Scaleway"
             
             # Log which service and model we're using
-            logger.info(f"🔷 Using service: {service}")
+            logger.info(f"🔷 Using service: {current_service}")
             logger.info(f"🔷 Model selected: {model_name}")
-            print(f"🔷 Starting LLM request with {service} service and model: {model_name}")
+            print(f"🔷 Starting LLM request with {current_service} service and model: {model_name}")
             
-            # Get response from selected service
-            if service == "Scaleway":
+            # CRITICAL FIX: FORCE LOG THE SERVICE AND URL
+            if current_service == "Ollama":
+                print(f"🤖 USING OLLAMA at URL: {ollama_url}")
+            else:
+                print(f"☁️ USING SCALEWAY with API key starting with: {SCALEWAY_API_KEY[:4]}...")
+            
+            # Get response from selected service - EXPLICITLY CHECK THE CURRENT SERVICE VALUE
+            if current_service == "Scaleway":
                 response = chat_with_scaleway(transcription, model_name, SCALEWAY_API_KEY)
             else:  # Ollama
+                print(f"🔶 Attempting to connect to Ollama at: {ollama_url}")
                 response = chat_with_ollama(transcription, model_name, ollama_url)
             
             # Log time taken for LLM response
@@ -1241,14 +1271,61 @@ with gr.Blocks() as demo:
             logger.exception(e)
             return f"Error: {str(e)}", ""
 
+    # Add this function to directly update the global service variable
+    def update_service_selection(service):
+        """Update the global service selection variable"""
+        global CURRENT_SERVICE
+        old_service = CURRENT_SERVICE
+        CURRENT_SERVICE = service
+        print(f"🔄 Service changed from {old_service} to {CURRENT_SERVICE}")
+        return service
+
+    # Now update the toggle function inside the blocks context
+    def toggle_service_options(service):
+        """Handle service toggling between Scaleway and Ollama"""
+        global CURRENT_SERVICE
+        CURRENT_SERVICE = service  # Update global variable
+        
+        print(f"📢 Service toggled to: {service}")
+        print(f"Global CURRENT_SERVICE is now: {CURRENT_SERVICE}")
+        
+        if service == "Scaleway":
+            return gr.update(
+                choices=[
+                    "deepseek-r1-distill-llama-70b",
+                    "meta-llama-3-70b-instruct", 
+                    "mixtral-8x7b-instruct-v0.1"
+                ],
+                value="deepseek-r1-distill-llama-70b"
+            ), gr.update(visible=False)
+        else:  # Ollama
+            return gr.update(
+                choices=[
+                    "mistral:latest",
+                    "llama3:8b",
+                    "llama3:70b",
+                    "gemma3:27b",
+                    "phi3:14b",
+                    "mixtral:8x7b",
+                    "codellama:70b"
+                ],
+                value="mistral:latest"
+            ), gr.update(visible=True)
+
     # Process voice input in three steps
     voice_input.change(
         fn=transcribe_step,
         inputs=[voice_input],
         outputs=[transcribed_text, status]
     ).then(
+        # First, explicitly update the service selection
+        fn=update_service_selection,
+        inputs=[llm_service],
+        outputs=None
+    ).then(
         # Step 2: Process with LLM and show text response immediately
-        fn=get_llm_response,
+        # Now explicitly passing the current service
+        fn=lambda text, model, url, service: get_llm_response(text, model, url, service),
         inputs=[transcribed_text, model_name, ollama_url, llm_service],
         outputs=[status, text_output]
     ).then(
@@ -1282,36 +1359,22 @@ with gr.Blocks() as demo:
         outputs=[conversation_display]
     )
     
-    # Add toggle_service_options function inside the Blocks context
-    def toggle_service_options(service):
-        if service == "Scaleway":
-            return gr.update(
-                choices=[
-                    "deepseek-r1-distill-llama-70b",
-                    "meta-llama-3-70b-instruct", 
-                    "mixtral-8x7b-instruct-v0.1"
-                ],
-                value="deepseek-r1-distill-llama-70b"
-            ), gr.update(visible=False)
-        else:  # Ollama
-            return gr.update(
-                choices=[
-                    "mistral:latest",
-                    "llama3:8b",
-                    "llama3:70b",
-                    "gemma3:27b",
-                    "phi3:14b",
-                    "mixtral:8x7b",
-                    "codellama:70b"
-                ],
-                value="mistral:latest"
-            ), gr.update(visible=True)
-    
-    # Toggle visibility based on service selection - MOVE THIS INSIDE THE BLOCKS CONTEXT
+    # Add this debugging function to check the current state
+    def debug_service_selection(service):
+        """Print debug info about service selection"""
+        print(f"👉 Service selected: {service}")
+        return service
+
+    # Make sure the event handler is properly connected
     llm_service.change(
         fn=toggle_service_options,
         inputs=[llm_service],
         outputs=[model_name, ollama_url]
+    ).then(
+        # Add this to validate selection was applied
+        fn=update_service_selection,
+        inputs=[llm_service],
+        outputs=None
     )
 
 # Launch code stays outside the blocks context
