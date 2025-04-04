@@ -723,8 +723,8 @@ def create_gradio_interface():
 
 # Mount Gradio app to FastAPI
 gr.mount_gradio_app(
-    app=web_app,
-    blocks=create_gradio_interface(),
+        app=web_app,
+        blocks=create_gradio_interface(),
     path="/",
 )
 
@@ -793,7 +793,7 @@ def app_entrypoint():
     # In the app_entrypoint function, add this explicit path creation:
     os.makedirs(SESSION_DIR, exist_ok=True)
     
-    return web_app
+    return web_app                  
 
 @enter(snap=False)
 def initialize_after_snapshot():
@@ -804,4 +804,4 @@ def initialize_after_snapshot():
     logger.info("Session state reset after snapshot restore")
 
 if __name__ == "__main__":
-    print("Deploy this app with: modal deploy app_scaleway_modal.py")                  
+    print("Deploy this app with: modal deploy app_scaleway_modal.py")                                
