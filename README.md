@@ -33,6 +33,13 @@ This application provides a voice chat interface powered by AI language models (
 - Modal CLI installed (`pip install modal`)
 - Hugging Face account (for CSM model access)
 
+### For Scaleway Serverless Container Deployment
+
+- Scaleway account with Container Registry and Serverless Containers enabled
+- Docker installed locally
+- Scaleway CLI (optional)
+- Container Registry namespace
+
 ## Setup Instructions for Local Deployment
 
 ### Step 1: Create a Python virtual environment
@@ -70,54 +77,127 @@ python app_scaleway.py
 
 The application will be available at http://localhost:7860 by default.
 
-## Setup Instructions for Modal Deployment
+## Setup Instructions for Scaleway Serverless Container Deployment
 
-### Step 1: Install the Modal CLI
+### Step 1: Create a Dockerfile
 
-```bash
-pip install modal
+Create a file named `Dockerfile` with the following content:
+
+```dockerfile
+FROM python:3.11-slim
+
+WORKDIR /app
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ffmpeg \
+    libsndfile1 \
+    libasound2-dev \
+    portaudio19-dev \
+    python3-pyaudio \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy application file
+COPY app_simple_scaleway.py ./app.py
+
+# Install packages in separate steps for better reliability
+RUN pip install --no-cache-dir \
+    gradio==5.23.1 \
+    transformers==4.35.2 \
+    numpy==1.25.2 \
+    requests==2.31.0 \
+    gtts==2.3.2 \
+    pydub==0.25.1 \
+    soundfile==0.12.1 \
+    PyAudio==0.2.13
+
+# Install PyTorch separately with its custom index
+RUN pip install --no-cache-dir \
+    torch==2.1.1 torchaudio==2.1.1 --index-url https://download.pytorch.org/whl/cpu
+
+# Pre-download models to avoid runtime downloads
+RUN python -c "from transformers import WhisperProcessor, WhisperForConditionalGeneration; \
+    processor = WhisperProcessor.from_pretrained('openai/whisper-base'); \
+    model = WhisperForConditionalGeneration.from_pretrained('openai/whisper-base')"
+
+# Create directories
+RUN mkdir -p audio_outputs user_sessions
+
+# Expose port
+EXPOSE 7860
+
+# Start application
+CMD ["python", "app.py"]
 ```
 
-### Step 2: Configure Modal 
-
-Login to Modal:
+### Step 2: Build the Docker image for AMD64 architecture
 
 ```bash
-modal token new
+docker buildx build --load --platform=linux/amd64 -t scaleway-voice-chat .
 ```
 
-### Step 3: Create Required Secrets
-
-Create the following secrets in your Modal account:
+### Step 3: Push to Scaleway Container Registry
 
 ```bash
-# URL for your Ollama server
-modal secret create llama_server_url "https://your-ollama-server-endpoint"
+# Login to Scaleway Container Registry (replace with your namespace)
+docker login rg.nl-ams.scw.cloud/your-namespace -u nologin -p your-scaleway-api-key
 
-# For secure access to your Modal app
-modal secret create MODAL_PROXY_TOKEN_ID "your-token-id"
-modal secret create MODAL_PROXY_TOKEN_SECRET "your-token-secret"
+# Tag the image
+docker tag scaleway-voice-chat rg.nl-ams.scw.cloud/your-namespace/scaleway-voice-chat:latest
 
-# Optional - for restricted access to Gradio UI
-modal secret create gradio_app_access_key "your-access-key"
-
-# Required - Hugging Face token for accessing CSM model
-modal secret create hf-secret "your-huggingface-token"
+# Push to registry
+docker push rg.nl-ams.scw.cloud/your-namespace/scaleway-voice-chat:latest
 ```
 
-### Step 4: Create a Modal Volume and Deploy
+### Step 4: Deploy as Serverless Container
+
+**Option 1: Using Scaleway Console**
+
+1. Go to the [Scaleway Console](https://console.scaleway.com/)
+2. Navigate to "Serverless" → "Containers"
+3. Click "Create Container"
+4. Configure your container:
+   - Name: `scaleway-voice-chat`
+   - Container Image: Select your registry and `scaleway-voice-chat:latest` image
+   - Memory: 2GB
+   - CPU: 2 vCPU
+   - Environment Variables:
+     - Name: `SCALEWAY_API_KEY`
+     - Value: Your Scaleway API key
+     - Type: Secret (ensures it's stored securely)
+   - Port: 7860
+5. Click "Create Container"
+
+**Option 2: Using Scaleway CLI**
 
 ```bash
-modal volume create voice-chat-volume
-modal deploy app_modal.py
+# Install Scaleway CLI if needed
+curl -o /usr/local/bin/scw -L "https://github.com/scaleway/scaleway-cli/releases/latest/download/scw-darwin-arm64"
+chmod +x /usr/local/bin/scw
+scw init
+
+# Deploy container
+scw container namespace function create \
+  --namespace-id your-namespace \
+  --name scaleway-voice-chat \
+  --registry-image rg.nl-ams.scw.cloud/your-namespace/scaleway-voice-chat:latest \
+  --memory-limit 2G \
+  --port 7860 \
+  --env SCALEWAY_API_KEY=your-api-key:secret \
+  --region nl-ams
 ```
+
+### Step 5: Access Your Deployed Application
+
+Once deployed, you can access your application at the URL provided by Scaleway Serverless Containers.
 
 ## Using the Application
 
 ### Accessing the Web Interface
 
-1. Navigate to the local URL or Modal deployment URL in your browser
+1. Navigate to the local URL, Modal deployment URL, or Scaleway Serverless Container URL in your browser
 2. For Modal, add `/ui` to the URL (e.g., `https://your-username--voice-chat-app-v1-serve.modal.run/ui`)
+3. For Scaleway Serverless Container, use the URL provided in the console (e.g., `https://your-function-id.functions.fnc.fr-par.scw.cloud`)
 
 ### Using the Voice Chat
 
@@ -184,12 +264,34 @@ export CLEANUP_INTERVAL_HOURS="24"  # How often to run the cleanup job (in hours
 export PYTHONPATH=./  # If needed to resolve import issues
 ```
 
+### Scaleway Serverless Container Options
+
+When deploying to Scaleway Serverless Containers, you can customize:
+
+1. **Environment Variables**:
+   - `SCALEWAY_API_KEY`: Your Scaleway API key (set as a secret)
+   - `SESSION_DIR`: Directory where session files are stored
+   - `SESSION_RETENTION_DAYS`: Days to keep session files
+   - `CLEANUP_INTERVAL_HOURS`: How often to run cleanup
+
+2. **Resources**:
+   - Memory: 2GB recommended for good performance
+   - vCPU: 2 vCPU recommended for faster processing
+   - Minimum Scale: 0 (scale to zero when not in use)
+   - Maximum Scale: Based on your expected traffic
+
+3. **Security**:
+   - Always set API keys as Secrets in the console
+   - Consider adding authentication if needed
+   - Enable HTTPS termination (recommended)
+
 ### Making the App Public
 
 To make your Gradio app publicly accessible:
 
 1. With the local deployment, set `share=True` in the `demo.launch()` call (already configured)
 2. For Modal deployment, the app is accessible via the provided URL
+3. For Scaleway Serverless Container, the app is automatically accessible via the provided URL
 
 ### Session Storage
 
@@ -230,6 +332,12 @@ The system automatically cleans up old session files based on the `SESSION_RETEN
    - If custom IDs don't work, ensure there are no special characters in your ID
    - If sessions are shared between browsers, ensure you're using a different Custom Session ID for each
 
+7. **Serverless Container Issues**:
+   - Container not starting: Check for logs in the Scaleway console
+   - Long cold start times: Pre-downloading models in the Dockerfile helps
+   - Memory errors: Increase the memory allocation
+   - Microphone not working: HTTPS is required for microphone access, ensure it's enabled
+
 ## Architecture
 
 The application consists of the following components:
@@ -244,7 +352,9 @@ The application consists of the following components:
 - **Gradio UI**: Provides intuitive web interface
 
 The application is structured with modular architecture:
-- `app_scaleway.py`: Main application file
+- `app_scaleway.py`: Main application file for local deployment
+- `app_scaleway_modal.py`: Version optimized for Modal deployment
+- `app_simple_scaleway.py`: Simplified version for Scaleway Serverless Containers
 - `audio_utils.py`: Audio processing and transcription
 - `llm_services.py`: Connects to language models
 - `text_utils.py`: Text processing and formatting
